@@ -8,6 +8,7 @@ export interface Event {
     start_time?: string;
     end_time?: string;
     created_at?: string;
+    owner_id?: string;
 }
 
 export interface Attendant {
@@ -42,4 +43,12 @@ export interface EventGroup {
     limit_count: number;
     zone_label?: string;
     current_count?: number; // Helper for UI
+}
+
+export interface Profile {
+    id: string;
+    email: string;
+    full_name: string;
+    role: 'super_admin' | 'faculty';
+    created_at: string;
 }

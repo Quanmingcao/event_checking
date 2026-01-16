@@ -1,43 +1,62 @@
-import * as faceapi from 'face-api.js';
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000';
 
-// Configuration
-const MODEL_URL = '/models';
+export interface RecognitionResult {
+    found: boolean;
+    score: number;
+    message?: string;
+    attendant?: any;
+}
 
-// Load models
-export const loadModels = async () => {
+export const recognizeFace = async (imageBlob: Blob, eventId: string): Promise<RecognitionResult> => {
+    const formData = new FormData();
+    formData.append('file', imageBlob);
+    formData.append('event_id', eventId);
+
     try {
-        await Promise.all([
-            faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL), // Heavy but accurate
-            faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
-            faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL),
-        ]);
-        console.log('FaceAPI Models Loaded');
+        const response = await fetch(`${API_URL}/recognize`, {
+            method: 'POST',
+            body: formData,
+        });
+
+        if (!response.ok) {
+            throw new Error(`API Error: ${response.statusText}`);
+        }
+
+        return await response.json();
     } catch (error) {
-        console.error('Failed to load FaceAPI models', error);
+        console.error("Face Recognition API Error:", error);
         throw error;
     }
 };
 
-// Detect single face and return descriptor
-export const detectFace = async (input: HTMLImageElement | HTMLVideoElement | HTMLCanvasElement) => {
-    // Use SSD MobileNet V1 for better accuracy than TinyFaceDetector
-    // We can switch to TinyFaceDetector if performance on mobile is bad,
-    // but for "Registration" (one-time), accuracy is priority.
+export const getFaceEmbedding = async (imageBlob: Blob): Promise<number[]> => {
+    const formData = new FormData();
+    formData.append('file', imageBlob);
 
-    const detection = await faceapi
-        .detectSingleFace(input, new faceapi.SsdMobilenetv1Options({ minConfidence: 0.5 }))
-        .withFaceLandmarks()
-        .withFaceDescriptor();
+    try {
+        const response = await fetch(`${API_URL}/register`, {
+            method: 'POST',
+            body: formData,
+        });
 
-    if (!detection) {
-        return null;
+        if (!response.ok) {
+            throw new Error(`API Error: ${response.statusText}`);
+        }
+
+        const data = await response.json();
+        if (data.error) {
+            throw new Error(data.error);
+        }
+        return data.embedding; // 512-d array
+    } catch (error) {
+        console.error("Face Registration API Error:", error);
+        throw error;
     }
-
-    return detection.descriptor; // Float32Array
 };
 
-// Helper: Resize image to max dimensions to save bandwidth & speed up AI
-export const resizeImage = async (file: File, maxWidth = 800): Promise<Blob> => {
+// Helper: Resize image (Optional, but good for bandwidth)
+// We keep this helper if we want to resize before sending to server
+export const resizeImage = async (file: File | Blob, maxWidth = 800): Promise<Blob> => {
     return new Promise((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = (event) => {
@@ -60,20 +79,11 @@ export const resizeImage = async (file: File, maxWidth = 800): Promise<Blob> => 
                 canvas.toBlob((blob) => {
                     if (blob) resolve(blob);
                     else reject(new Error('Canvas to Blob failed'));
-                }, file.type, 0.9);
+                }, 'image/jpeg', 0.9);
             };
             img.src = event.target?.result as string;
         };
         reader.onerror = reject;
         reader.readAsDataURL(file);
     });
-};
-
-// Helper: Match face (will be used in CheckIn later)
-export const matchFace = (
-    descriptor: Float32Array,
-    labeledDescriptors: faceapi.LabeledFaceDescriptors[]
-) => {
-    const faceMatcher = new faceapi.FaceMatcher(labeledDescriptors, 0.6);
-    return faceMatcher.findBestMatch(descriptor);
 };

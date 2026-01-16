@@ -133,3 +133,8 @@ Desktop.ini
 *.njsproj
 *.sln
 *.sw?
+
+# Python
+venv/
+.venv/
+__pycache__/

@@ -1,9 +1,9 @@
 import React, { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
-import { Event, Attendant } from '../types';
+import { Event, Attendant, CheckinLog } from '../types';
+import { Calendar, MapPin, Users, Download, Search, Filter, Trash2, Edit, Plus, UserPlus, FileUp, Copy, Check, ArrowLeft, Upload, Save, RefreshCw, Image as ImageIcon } from 'lucide-react';
 import * as XLSX from 'xlsx';
-import { ArrowLeft, Upload, Save, RefreshCw, Image as ImageIcon } from 'lucide-react';
 
 import { AdminGroups } from '../components/AdminGroups';
 
@@ -112,8 +112,16 @@ export default function AdminEvent() {
 
   useEffect(() => {
     if (id) {
-      fetchEventDetails();
-      fetchAttendants();
+       // PARALLEL FETCHING
+      const initData = async () => {
+         setLoading(true);
+         await Promise.all([
+             fetchEventDetails(),
+             fetchAttendants()
+         ]);
+         setLoading(false);
+      };
+      initData();
       
       const channel = supabase
         .channel('admin-event-updates')
@@ -165,7 +173,7 @@ export default function AdminEvent() {
   const fetchAttendants = async () => {
     const { data } = await supabase.from('attendants').select('*').eq('event_id', id).order('created_at', { ascending: false });
     if (data) setAttendants(data);
-    setLoading(false);
+    // setLoading(false); // Handled in initData
   };
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -244,7 +252,21 @@ export default function AdminEvent() {
             </Link>
             <div>
                 <h1 className="text-2xl font-bold text-gray-900">{event.name}</h1>
-                <p className="text-sm text-gray-500">Mã sự kiện: <span className="font-mono bg-gray-100 px-1">{event.event_code}</span></p>
+                <div className="flex items-center space-x-2 text-sm text-gray-500 mt-1">
+                    <span>Mã sự kiện: <span className="font-mono bg-gray-100 px-2 py-0.5 rounded font-bold text-gray-800 border border-gray-200">{event.event_code}</span></span>
+                    <button 
+                        onClick={() => {
+                            if (event?.event_code) {
+                                navigator.clipboard.writeText(event.event_code);
+                                alert("Đã sao chép mã sự kiện: " + event.event_code);
+                            }
+                        }}
+                        className="p-1 text-gray-400 hover:text-indigo-600 transition-colors"
+                        title="Sao chép"
+                    >
+                        <Copy className="w-4 h-4" />
+                    </button>
+                </div>
             </div>
         </div>
         <div className="flex space-x-2">

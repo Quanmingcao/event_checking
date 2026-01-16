@@ -13,6 +13,7 @@ export default function PublicFaceRegister() {
     const [selectedGroup, setSelectedGroup] = useState<EventGroup | null>(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const [isCustomOrg, setIsCustomOrg] = useState(false);
 
     // Form State
     const [formData, setFormData] = useState({
@@ -102,12 +103,29 @@ export default function PublicFaceRegister() {
             let currentAttendantId = null;
 
             // 3. Check Existence (Get FULL data to preserve VIP status)
-            const { data: existing } = await supabase
+            let { data: existing } = await supabase
                 .from('attendants')
                 .select('*')
                 .eq('event_id', event.id)
                 .or(`email.eq.${formData.email},phone.eq.${formData.phone}`)
                 .maybeSingle();
+
+            // FALLBACK: If not found by unique contact info, try matching by NAME (Case Insensitive)
+            // This is for cases where Admin added a VIP by name only (no email/phone)
+            if (!existing) {
+                const { data: existingByName } = await supabase
+                    .from('attendants')
+                    .select('*')
+                    .eq('event_id', event.id)
+                    .ilike('full_name', formData.full_name.trim())
+                    .maybeSingle(); // Take the first match if multiple
+                
+                if (existingByName) {
+                    // Only match if the existing record actually looks like a placeholder (optional check, but good for safety)
+                    // For now, we assume if names match and email/phone didn't match (meaning input email is new), we merge.
+                    existing = existingByName;
+                }
+            }
 
             const commonData = {
                 event_id: event.id,
@@ -170,7 +188,7 @@ export default function PublicFaceRegister() {
     };
 
     // Step 2: Update Face Data
-    const handleFaceUpdate = async (blob: Blob, descriptor: Float32Array) => {
+    const handleFaceUpdate = async (blob: Blob, embedding: number[]) => {
         setLoading(true);
         if (!event || !attendantId) return;
 
@@ -193,7 +211,7 @@ export default function PublicFaceRegister() {
                 .from('attendants')
                 .update({ 
                     avatar_url: publicUrl,
-                    face_descriptor: Array.from(descriptor)
+                    face_descriptor: embedding // Already number[]
                 })
                 .eq('id', attendantId);
             
@@ -315,22 +333,44 @@ export default function PublicFaceRegister() {
                                                 <Building className="h-5 w-5 text-gray-400" />
                                             </div>
                                             {groups.length > 0 ? (
-                                                <select
-                                                    className="focus:ring-indigo-500 focus:border-indigo-500 block w-full pl-10 sm:text-sm border-gray-300 rounded-md p-2.5 border"
-                                                    value={selectedGroup?.id || ''}
-                                                    onChange={e => {
-                                                        const g = groups.find(x => x.id === e.target.value);
-                                                        setSelectedGroup(g || null);
-                                                        setFormData({...formData, organization: g ? g.name : ''});
-                                                    }}
-                                                >
-                                                    <option value="">-- Chọn đơn vị --</option>
-                                                    {groups.map(g => (
-                                                        <option key={g.id} value={g.id}>
-                                                            {g.name} {g.limit_count > 0 ? `(Giới hạn: ${g.limit_count})` : ''}
-                                                        </option>
-                                                    ))}
-                                                </select>
+                                                <>
+                                                    <select
+                                                        className="focus:ring-indigo-500 focus:border-indigo-500 block w-full pl-10 sm:text-sm border-gray-300 rounded-md p-2.5 border"
+                                                        value={isCustomOrg ? 'other' : (selectedGroup?.id || '')}
+                                                        onChange={e => {
+                                                            const val = e.target.value;
+                                                            if (val === 'other') {
+                                                                setIsCustomOrg(true);
+                                                                setSelectedGroup(null);
+                                                                setFormData({...formData, organization: ''});
+                                                            } else {
+                                                                setIsCustomOrg(false);
+                                                                const g = groups.find(x => x.id === val);
+                                                                setSelectedGroup(g || null);
+                                                                setFormData({...formData, organization: g ? g.name : ''});
+                                                            }
+                                                        }}
+                                                    >
+                                                        <option value="">-- Chọn đơn vị --</option>
+                                                        {groups.map(g => (
+                                                            <option key={g.id} value={g.id} disabled={g.current_count >= g.limit_count && g.limit_count > 0}>
+                                                                {g.name} {g.limit_count > 0 ? `(Giới hạn: ${g.limit_count})` : ''} {g.current_count >= g.limit_count && g.limit_count > 0 ? '- Đã đủ' : ''}
+                                                            </option>
+                                                        ))}
+                                                        <option value="other">-- Khác / Tự nhập --</option>
+                                                    </select>
+                                                    
+                                                    {isCustomOrg && (
+                                                        <input
+                                                            type="text"
+                                                            required
+                                                            className="mt-2 focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md p-2.5 border"
+                                                            placeholder="Nhập tên đơn vị của bạn..."
+                                                            value={formData.organization}
+                                                            onChange={e => setFormData({...formData, organization: e.target.value})}
+                                                        />
+                                                    )}
+                                                </>
                                             ) : (
                                                 <input
                                                     type="text"

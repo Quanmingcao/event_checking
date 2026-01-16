@@ -1,14 +1,14 @@
 import React, { useRef, useState, useEffect } from 'react';
 import { Camera, Upload, RefreshCw, CheckCircle, AlertCircle } from 'lucide-react';
-import { loadModels, detectFace, resizeImage } from '../services/faceService';
+import { getFaceEmbedding, resizeImage } from '../services/faceService';
 
 interface FaceCaptureProps {
-    onCapture: (blob: Blob, descriptor: Float32Array) => void;
+    onCapture: (blob: Blob, embedding: number[]) => void;
 }
 
 export const FaceCapture: React.FC<FaceCaptureProps> = ({ onCapture }) => {
     const [mode, setMode] = useState<'initial' | 'camera' | 'preview'>('initial');
-    const [isModelsLoaded, setIsModelsLoaded] = useState(false);
+    const [isModelsLoaded, setIsModelsLoaded] = useState(true); // Always true now
     const [isAnalysing, setIsAnalysing] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [imgSrc, setImgSrc] = useState<string | null>(null);
@@ -16,19 +16,6 @@ export const FaceCapture: React.FC<FaceCaptureProps> = ({ onCapture }) => {
     const videoRef = useRef<HTMLVideoElement>(null);
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const streamRef = useRef<MediaStream | null>(null);
-
-    // Load AI Models on mount
-    useEffect(() => {
-        const init = async () => {
-            try {
-                await loadModels();
-                setIsModelsLoaded(true);
-            } catch (err) {
-                setError('Failed to load AI models. Please refresh.');
-            }
-        };
-        init();
-    }, []);
 
     // Cleanup camera on unmount
     useEffect(() => {
@@ -112,31 +99,22 @@ export const FaceCapture: React.FC<FaceCaptureProps> = ({ onCapture }) => {
         setIsAnalysing(true);
         setError(null);
         
-        // Create an HTMLImageElement to pass to face-api
-        const img = new Image();
-        img.src = url;
-        img.onload = async () => {
-            try {
-                if (!isModelsLoaded) {
-                    await loadModels(); // Just in case
-                    setIsModelsLoaded(true);
-                }
-
-                const descriptor = await detectFace(img);
-                
-                if (descriptor) {
-                    onCapture(blob, descriptor);
-                    setIsAnalysing(false);
-                } else {
-                    setError('No face detected. Please try again.');
-                    setIsAnalysing(false);
-                }
-            } catch (err) {
-                console.error(err);
-                setError('AI detection failed.');
+        try {
+            // Call Python API to get embedding
+            const embedding = await getFaceEmbedding(blob);
+            
+            if (embedding && embedding.length > 0) {
+                onCapture(blob, embedding);
+                setIsAnalysing(false);
+            } else {
+                setError('No face detected. Please try again.');
                 setIsAnalysing(false);
             }
-        };
+        } catch (err: any) {
+            console.error(err);
+            setError(err.message || 'AI detection failed.');
+            setIsAnalysing(false);
+        }
     };
 
     const handleRetake = () => {

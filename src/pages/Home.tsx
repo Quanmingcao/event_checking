@@ -3,12 +3,12 @@ import { supabase } from '../lib/supabase';
 import { Event } from '../types';
 import { Link } from 'react-router-dom';
 import { Calendar, QrCode, Monitor, Settings, Plus, MapPin, Clock, X } from 'lucide-react';
+import { useAuth } from '../contexts/AuthContext';
 
 export default function Home() {
+  const { user, profile } = useAuth();
   const [events, setEvents] = useState<Event[]>([]);
   const [loading, setLoading] = useState(true);
-  
-  // Modal State
   const [showModal, setShowModal] = useState(false);
   const [formData, setFormData] = useState({
       name: '',
@@ -19,34 +19,43 @@ export default function Home() {
   const [creating, setCreating] = useState(false);
 
   useEffect(() => {
-    fetchEvents();
+    if (user) {
+        fetchEvents();
+    }
 
-    // --- REALTIME SETUP ---
-    // Lắng nghe sự kiện INSERT vào bảng 'events'
+    // Enable Realtime updates
     const channel = supabase
-      .channel('public:events')
-      .on(
+    .channel('public:events')
+    .on(
         'postgres_changes',
         { event: 'INSERT', schema: 'public', table: 'events' },
         (payload) => {
-          // Khi có sự kiện mới, thêm ngay vào đầu danh sách
-          const newEvent = payload.new as Event;
-          setEvents((prev) => [newEvent, ...prev]);
+           const newEvent = payload.new as Event;
+           // Only add to list if Super Admin OR owner matches
+           if (profile?.role === 'super_admin' || newEvent.owner_id === user?.id) {
+               setEvents((prev) => [newEvent, ...prev]);
+           }
         }
-      )
-      .subscribe();
+    )
+    .subscribe();
 
     return () => {
-      supabase.removeChannel(channel);
+         supabase.removeChannel(channel);
     };
-  }, []);
+  }, [user, profile]);
 
   const fetchEvents = async () => {
     try {
-      const { data, error } = await supabase
-        .from('events')
-        .select('*')
-        .order('created_at', { ascending: false });
+      setLoading(true);
+      
+      let query = supabase.from('events').select('*').order('created_at', { ascending: false });
+
+      // FILTERING LOGIC
+      if (profile && profile.role !== 'super_admin') {
+          query = query.eq('owner_id', user?.id);
+      }
+
+      const { data, error } = await query;
 
       if (error) throw error;
       setEvents(data || []);
@@ -64,7 +73,6 @@ export default function Home() {
 
       try {
           const code = Math.random().toString(36).substring(7).toUpperCase();
-          // Insert xong không cần gọi fetchEvents() nữa vì Realtime sẽ tự lo
           const { error } = await supabase.from('events').insert([
               { 
                   name: formData.name,
@@ -72,13 +80,16 @@ export default function Home() {
                   start_time: formData.start_time || null,
                   end_time: formData.end_time || null,
                   event_code: code,
-                  created_at: new Date().toISOString()
+                  created_at: new Date().toISOString(),
+                  owner_id: user?.id // IMPORTANT: Assign owner
               }
           ]);
           if (error) throw error;
           
           setFormData({ name: '', location: '', start_time: '', end_time: '' });
           setShowModal(false);
+          // fetchEvents is usually handled by realtime, but we can also manually refresh to be safe
+          fetchEvents();
       } catch (err: any) {
           alert('Lỗi khi tạo sự kiện: ' + err.message);
       } finally {
@@ -167,7 +178,7 @@ export default function Home() {
         {events.length === 0 && (
             <div className="col-span-full text-center py-16 bg-white rounded-lg border border-dashed border-gray-300">
                 <Calendar className="mx-auto h-12 w-12 text-gray-400" />
-                <h3 className="mt-2 text-sm font-medium text-gray-900">Chưa có sự kiện nào</h3>
+                <h3 className="mt-2 text-sm font-medium text-gray-900">Bạn chưa có sự kiện nào</h3>
                 <p className="mt-1 text-sm text-gray-500">Bắt đầu bằng cách tạo một sự kiện mới.</p>
                 <div className="mt-6">
                     <button

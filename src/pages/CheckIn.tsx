@@ -4,8 +4,7 @@ import { Html5QrcodeScanner } from 'html5-qrcode';
 import { supabase } from '../lib/supabase';
 import { Attendant } from '../types';
 import { ArrowLeft, CheckCircle, XCircle, QrCode, ScanFace, Camera, RefreshCw } from 'lucide-react';
-import * as faceapi from 'face-api.js';
-import { loadModels } from '../services/faceService';
+import { recognizeFace } from '../services/faceService';
 
 export default function CheckIn() {
   const { id } = useParams<{ id: string }>();
@@ -14,10 +13,9 @@ export default function CheckIn() {
   const [mode, setMode] = useState<'qr' | 'face'>('qr');
   const [scanResult, setScanResult] = useState<{ success: boolean; message: string; attendant?: Attendant } | null>(null);
   const [processing, setProcessing] = useState(false);
-  const [loadingModels, setLoadingModels] = useState(false);
-  const [matcher, setMatcher] = useState<faceapi.FaceMatcher | null>(null);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [facingMode, setFacingMode] = useState<'user' | 'environment'>('user');
+  const [cameraReady, setCameraReady] = useState(false);
 
   // Refs
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -32,52 +30,15 @@ export default function CheckIn() {
     };
   }, []);
 
-  // 2. Load Models & Face Data when switching to Face Mode
+  // 2. Camera Management for Face Mode
   useEffect(() => {
-    if (mode === 'face' && !matcher) {
-      const initFaceReqs = async () => {
-        setLoadingModels(true);
-        try {
-            // A. Load Models
-            await loadModels();
-            
-            // B. Fetch Attendants with Descriptors
-            const { data: attendants } = await supabase
-                .from('attendants')
-                .select('*')
-                .eq('event_id', id)
-                .not('face_descriptor', 'is', null);
-
-            if (attendants && attendants.length > 0) {
-                 const labeledDescriptors = attendants.map(att => {
-                    const descriptorArray = new Float32Array(att.face_descriptor);
-                    return new faceapi.LabeledFaceDescriptors(att.id, [descriptorArray]);
-                 });
-                 
-                 // Create Matcher (standard distance 0.6)
-                 setMatcher(new faceapi.FaceMatcher(labeledDescriptors, 0.6));
-            } else {
-                 console.warn("No face data found for this event.");
-            }
-
-            // Camera is started by the next effect based on 'mode'
-        } catch (err) {
-            console.error("Setup Face Error:", err);
-            setCameraError("Lỗi khởi tạo AI hoặc Camera.");
-        } finally {
-            setLoadingModels(false);
-        }
-      };
-      initFaceReqs();
-    }
-    
-    // Manage Camera Lifecycle
-    if (mode === 'face' && matcher) {
+    if (mode === 'face') {
+        setCameraReady(false);
         startCamera();
     } else {
         stopCamera();
     }
-  }, [mode, matcher, facingMode]); // Restart camera if facingMode changes
+  }, [mode, facingMode]);
 
   // 3. QR Code Scanner Effect
   useEffect(() => {
@@ -106,9 +67,7 @@ export default function CheckIn() {
           streamRef.current = stream;
           if (videoRef.current) {
               videoRef.current.srcObject = stream;
-              
-              // Start Detection Loop
-              intervalRef.current = setInterval(detectFaceLoop, 200); // Check faster (200ms)
+              // Don't start loop immediately, wait for video to play (handled by onOnPlay/onLoadedData)
           }
       } catch (err) {
           console.error("Camera Error:", err);
@@ -131,29 +90,47 @@ export default function CheckIn() {
       }
   };
 
-  // ... (detectFaceLoop, onScanSuccess, onScanFailure, handleCheckIn remain unchanged) ...
-  const detectFaceLoop = async () => {
-      if (!videoRef.current || !matcher || processing) return;
+  const recognizeLoop = async () => {
+      if (!videoRef.current || processing || !id) return;
+      
+      const video = videoRef.current;
+      if (video.readyState !== 4) return; // Wait for video to be ready
 
-      // Relax detection confidence slightly
-      const detection = await faceapi
-          .detectSingleFace(videoRef.current, new faceapi.SsdMobilenetv1Options({ minConfidence: 0.4 }))
-          .withFaceLandmarks()
-          .withFaceDescriptor();
+      try {
+        // Capture frame
+        const canvas = document.createElement('canvas');
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+        
+        ctx.drawImage(video, 0, 0);
+        
+        canvas.toBlob(async (blob) => {
+            if (!blob) return;
 
-      if (detection) {
-          const bestMatch = matcher.findBestMatch(detection.descriptor);
-          console.log("Face Detected:", bestMatch.toString()); // DEBUG
+            // Send to Python API
+            try {
+                const result = await recognizeFace(blob, id);
+                
+                if (result.found && result.attendant) {
+                    console.log("Face Recognized:", result.attendant.full_name);
+                    setProcessing(true);
+                    
+                    // Call check-in logic with the returned attendant data
+                    await handleCheckIn(result.attendant.id, 'face', result.attendant);
+                    
+                    // Cooldown
+                    setTimeout(() => setProcessing(false), 3000);
+                }
+            } catch (err) {
+                // Ignore errors (e.g. server not ready yet) to avoid spamming
+                // console.warn("Recognition loop error", err);
+            }
+        }, 'image/jpeg', 0.8);
 
-          // Logic: If result is NOT 'unknown', we have a match
-          if (bestMatch.label !== 'unknown') {
-              setProcessing(true);
-              // bestMatch.label is the Attendant ID (set in LabeledFaceDescriptors)
-              await handleCheckIn(bestMatch.label, 'face');
-              
-              // Cooldown
-              setTimeout(() => setProcessing(false), 3000); 
-          }
+      } catch (err) {
+          console.error("Frame capture error:", err);
       }
   };
 
@@ -169,28 +146,31 @@ export default function CheckIn() {
 
   const onScanFailure = (error: any) => {};
 
-  const handleCheckIn = async (identifier: string, type: 'qr' | 'face') => {
-    // 1. Fetch Attendant Details
-    // For QR: identifier matches 'code'
-    // For Face: identifier matches 'id' (UUID)
-    
-    let query = supabase.from('attendants').select('*, event_groups (zone_label)').eq('event_id', id);
-    
-    if (type === 'qr') {
-        query = query.eq('code', identifier);
-    } else {
-        query = query.eq('id', identifier);
-    }
-    
-    const { data: attendants, error } = await query.limit(1);
+  const handleCheckIn = async (identifier: string, type: 'qr' | 'face', preloadedAttendant?: Attendant) => {
+    let attendant = preloadedAttendant;
+    let groupInfo = (attendant as any)?.event_groups;
 
-    if (error || !attendants || attendants.length === 0) {
-        if (type === 'qr') setScanResult({ success: false, message: `Mã "${identifier}" không tồn tại.` });
-        return;
+    // If we don't have the attendant data yet (QR scan), fetch it
+    if (!attendant) {
+        let query = supabase.from('attendants').select('*, event_groups (zone_label)').eq('event_id', id);
+        
+        if (type === 'qr') {
+            query = query.eq('code', identifier);
+        } else {
+            query = query.eq('id', identifier);
+        }
+        
+        const { data: attendants, error } = await query.limit(1);
+
+        if (error || !attendants || attendants.length === 0) {
+            if (type === 'qr') setScanResult({ success: false, message: `Mã "${identifier}" không tồn tại.` });
+            return;
+        }
+        attendant = attendants[0] as Attendant;
+        groupInfo = (attendant as any).event_groups;
     }
 
-    const attendant = attendants[0];
-    const groupInfo = (attendant as any).event_groups; // Joined data
+    if (!attendant) return; // Should not happen
 
     // Check Duplicate
     if (attendant.checked_in_at) {
@@ -271,15 +251,15 @@ export default function CheckIn() {
           {/* Face Mode */}
           {mode === 'face' && (
               <>
-                {loadingModels && (
-                    <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-gray-900/90 text-white">
-                        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-white mb-2"></div>
-                        <p className="text-sm">Đang tải dữ liệu khuôn mặt...</p>
-                    </div>
+                {/* Visual Feedback for processing/connecting */}
+                {!cameraReady && (
+                   <div className="absolute inset-0 z-10 flex items-center justify-center bg-gray-900 text-white">
+                      <p className="text-sm animate-pulse">Đang kết nối Camera...</p>
+                   </div>
                 )}
                 
                 {cameraError && (
-                    <div className="text-red-400 text-center p-4">
+                    <div className="text-red-400 text-center p-4 relative z-20">
                         <XCircle className="w-8 h-8 mx-auto mb-2" />
                         {cameraError}
                     </div>
@@ -291,10 +271,16 @@ export default function CheckIn() {
                         autoPlay
                         playsInline
                         muted
+                        onPlaying={() => {
+                            setCameraReady(true);
+                            if (!intervalRef.current) {
+                                intervalRef.current = setInterval(recognizeLoop, 500); 
+                            }
+                        }}
                         className={`w-full h-full object-cover ${facingMode === 'user' ? 'scale-x-[-1]' : ''}`} // Mirror if user facing
                     />
                 )}
-
+                
                 {/* Face Overlay Guide */}
                 <div className="absolute inset-0 pointer-events-none border-2 border-dashed border-indigo-400/50 m-12 rounded-lg z-10 opacity-50"></div>
                 {processing && (
